@@ -116,13 +116,20 @@ bool GReWeighthA2025::IsHandled(GSyst_t syst) const
    return handle;
 }
 //_______________________________________________________________________________________
-bool GReWeighthA2025::AppliesTo(ScatteringType_t type, bool /*is_cc*/) const
+
+bool GReWeighthA2025::AppliesTo(const EventRecord & event) const
 {
-  if (type != kScCoherentProduction ) {
-    return true;
+  auto type = event.Summary()->ProcInfo().ScatteringTypeId();
+  switch (type) {
+    case kScCoherentProduction:
+      return false;
+    default:
+      return true;
   }
-  return false;
 }
+
+
+
 //_______________________________________________________________________________________
 
 void GReWeighthA2025::SetSystematic(GSyst_t syst, double val)
@@ -235,30 +242,100 @@ double GReWeighthA2025::CalcWeight(const EventRecord & event)
 	  double KE = p4.Energy() - p4.M(); // kinetic energy
 	  double ke = KE / units::MeV;
 	  
-	  // get particle fate
-	  auto fate_rescatter = p->RescatterCode();
+	  
+     auto fate_rescatter = p->RescatterCode();
 	  
 	  // get fate frac
 
-	  if (fate_rescatter == kIHAFtAbs){
-	   fate_frac2018 = hd2018->FracADep(pdgc, kIHAFtAbs, ke, remnA);
-	   fate_frac2025 = hd2025->FracADep(pdgc, kIHAFtAbs, ke, remnA);	  
-	  }
-	  
-	   else if (fate_rescatter == kIHAFtInelas){
-	   fate_frac2018 = hd2018->FracADep(pdgc, kIHAFtInelas, ke, remnA);
-	   fate_frac2025 = hd2025->FracADep(pdgc, kIHAFtInelas, ke, remnA);	  
-	  }
-	  
-	 else if (fate_rescatter == kIHAFtCEx){
-	   fate_frac2018 = hd2018->FracADep(pdgc, kIHAFtCEx, ke, remnA);
-	   fate_frac2025 = hd2025->FracADep(pdgc, kIHAFtCEx, ke, remnA);	  
-	  }
-	  
-	 else if (fate_rescatter == kIHAFtPiProd){
-	   fate_frac2018 = hd2018->FracADep(pdgc, kIHAFtPiProd, ke, remnA);
-	   fate_frac2025 = hd2025->FracADep(pdgc, kIHAFtPiProd, ke, remnA);	  
-	  }
+
+    // Retrieve all pion fate fractions.
+    double frac2018_cex =
+        hd2018->FracADep(pdgc, kIHAFtCEx, ke, remnA);
+    double frac2018_inel =
+        hd2018->FracADep(pdgc, kIHAFtInelas, ke, remnA);
+    double frac2018_abs =
+        hd2018->FracADep(pdgc, kIHAFtAbs, ke, remnA);
+    double frac2018_piprod =
+        hd2018->FracADep(pdgc, kIHAFtPiProd, ke, remnA);
+
+    double frac2025_cex =
+        hd2025->FracADep(pdgc, kIHAFtCEx, ke, remnA);
+    double frac2025_inel =
+        hd2025->FracADep(pdgc, kIHAFtInelas, ke, remnA);
+    double frac2025_abs =
+        hd2025->FracADep(pdgc, kIHAFtAbs, ke, remnA);
+    double frac2025_piprod =
+        hd2025->FracADep(pdgc, kIHAFtPiProd, ke, remnA);
+
+    // Scale the hA2025 fractions for neutral pions.
+    const bool apply_pi0_ratio_correction = true;
+
+    if (apply_pi0_ratio_correction && pdgc == kPdgPi0) {
+        // Use the original KE in MeV, capped at 1000 MeV.
+        const double ke_ratio = (ke > 1000.0) ? 1000.0 : ke;
+
+        frac2025_cex  *=  0.0008702 * ke_ratio + 1.9047;
+        frac2025_abs  *=  0.0003291 * ke_ratio + 0.82617;
+        frac2025_inel *= -0.0003209 * ke_ratio + 0.837764;
+
+        if (ke > 400.0) {
+            frac2025_piprod *= 0.0004402 * ke_ratio + 0.47418;
+        }
+    }
+
+    // Normalize all four fractions together.
+    // A zero total leaves all fractions zero.
+    const auto normalize = [](double& cex, double& inel,
+                              double& abs, double& piprod) {
+        const double total = cex + inel + abs + piprod;
+
+        if (total > 0.0) {
+            cex    /= total;
+            inel   /= total;
+            abs    /= total;
+            piprod /= total;
+        } else {
+            cex = inel = abs = piprod = 0.0;
+        }
+    };
+
+    normalize(frac2018_cex, frac2018_inel,
+              frac2018_abs, frac2018_piprod);
+
+    normalize(frac2025_cex, frac2025_inel,
+              frac2025_abs, frac2025_piprod);
+
+    // Select the normalized fractions for the recorded rescattering fate.
+    fate_frac2018 = 0.0;
+    fate_frac2025 = 0.0;
+
+    switch (fate_rescatter) {
+        case kIHAFtAbs:
+            fate_frac2018 = frac2018_abs;
+            fate_frac2025 = frac2025_abs;
+            break;
+
+        case kIHAFtInelas:
+            fate_frac2018 = frac2018_inel;
+            fate_frac2025 = frac2025_inel;
+            break;
+
+        case kIHAFtCEx:
+            fate_frac2018 = frac2018_cex;
+            fate_frac2025 = frac2025_cex;
+            break;
+
+        case kIHAFtPiProd:
+            fate_frac2018 = frac2018_piprod;
+            fate_frac2025 = frac2025_piprod;
+            break;
+
+        default:
+            // No matching fate among the four handled pion fates.
+            break;
+    }
+	
+	
 	  
 	LOG("ReW", pNOTICE)
         << "New:::::Reweighted hadron at position = " << ip
